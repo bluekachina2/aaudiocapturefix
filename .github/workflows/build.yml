@@ -33,3 +33,26 @@ jobs:
       - name: Download Zygisk header
         run: |
           git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
+          cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
+
+      - name: Compile
+        run: |
+          "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk
+
+      - name: Package
+        run: |
+          mkdir -p module/zygisk
+          cp libs/arm64-v8a/libaaudiocapturefix.so module/zygisk/arm64-v8a.so
+          cd module
+          zip -r ../aaudiocapturefix-magisk.zip .
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: aaudiocapturefix-magisk
+          path: aaudiocapturefix-magisk.zip
+          if-no-files-found: error
+```

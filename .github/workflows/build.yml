@@ -1,325 +1,107 @@
-name: Build Magisk module
+name: Inspect AAudio ELF libraries
 
-"on":
-  push: {}
-  pull_request: {}
-  workflow_dispatch: {}
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "diagnostics/elfs/**"
+      - ".github/workflows/build.yml"
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04
+  inspect:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Extract project ZIP
-        shell: bash
+      - name: Locate Android SDK
         run: |
-          unzip -q aaudiocapturefix-github-project.zip -d /tmp/project
-          cp -a /tmp/project/aaudiocapturefix/jni .
-          cp -a /tmp/project/aaudiocapturefix/module .
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$(find "$SDK_ROOT" -type f -name sdkmanager | head -n 1)"
 
-      - name: Create safer AAudio hook source
-        shell: bash
-        run: |
-          cat > jni/main.cpp <<'EOF'
-          #include <android/log.h>
-          #include <dirent.h>
-          #include <stdio.h>
-          #include <stdint.h>
-          #include <string.h>
-          #include <sys/sysmacros.h>
-          #include <unistd.h>
-          #include "zygisk.hpp"
-
-          #define LOG_TAG "AAudioCaptureFix"
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-          #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-
-          static const char *TARGET_PACKAGE = "com.spotify.music";
-          static const char *HOOK_SYMBOL =
-              "AAudioStreamBuilder_setAllowedCapturePolicy";
-          static const int32_t AAUDIO_ALLOW_CAPTURE_BY_ALL = 1;
-
-          typedef int32_t (*setAllowedCapturePolicy_t)(
-              void *builder, int32_t policy);
-
-          static setAllowedCapturePolicy_t g_orig = nullptr;
-          static zygisk::Api *g_api = nullptr;
-
-          static int32_t hook_setAllowedCapturePolicy(
-              void *builder, int32_t policy) {
-              if (g_orig == nullptr) {
-                  LOGW("Original AAudio function is null");
-                  return -1;
-              }
-
-              if (policy != AAUDIO_ALLOW_CAPTURE_BY_ALL) {
-                  LOGI("Changing capture policy %d to ALLOW_ALL", policy);
-              }
-
-              return g_orig(builder, AAUDIO_ALLOW_CAPTURE_BY_ALL);
-          }
-
-          #define MAX_SEEN 512
-          static dev_t seen_dev[MAX_SEEN];
-          static ino_t seen_ino[MAX_SEEN];
-          static int seen_count = 0;
-
-          static bool already_seen(dev_t dev, ino_t ino) {
-              for (int i = 0; i < seen_count; i++) {
-                  if (seen_dev[i] == dev && seen_ino[i] == ino) {
-                      return true;
-                  }
-              }
-              return false;
-          }
-
-          static void mark_seen(dev_t dev, ino_t ino) {
-              if (seen_count < MAX_SEEN) {
-                  seen_dev[seen_count] = dev;
-                  seen_ino[seen_count] = ino;
-                  seen_count++;
-              }
-          }
-
-          static void scan_and_hook() {
-              FILE *maps = fopen("/proc/self/maps", "r");
-              if (maps == nullptr) {
-                  LOGW("Could not open /proc/self/maps");
-                  return;
-              }
-
-              int registration_attempts = 0;
-              char line[1024];
-
-              while (fgets(line, sizeof(line), maps) != nullptr) {
-                  unsigned long start, end, offset, inode;
-                  char perms[8];
-                  unsigned major, minor;
-                  int path_offset = 0;
-
-                  int n = sscanf(
-                      line, "%lx-%lx %7s %lx %x:%x %lu %n",
-                      &start, &end, perms, &offset,
-                      &major, &minor, &inode, &path_offset);
-
-                  if (n < 7 || inode == 0 || path_offset == 0) {
-                      continue;
-                  }
-
-                  char *path = line + path_offset;
-                  size_t len = strlen(path);
-
-                  while (len > 0 &&
-                         (path[len - 1] == '\n' || path[len - 1] == ' ')) {
-                      path[--len] = '\0';
-                  }
-
-                  while (*path == ' ') {
-                      path++;
-                  }
-
-                  if (*path == '\0' || path[0] == '[') {
-                      continue;
-                  }
-
-                  dev_t dev = makedev(major, minor);
-                  ino_t ino = (ino_t)inode;
-
-                  if (already_seen(dev, ino)) {
-                      continue;
-                  }
-
-                  mark_seen(dev, ino);
-
-                  g_api->pltHookRegister(
-                      dev,
-                      ino,
-                      HOOK_SYMBOL,
-                      reinterpret_cast<void *>(hook_setAllowedCapturePolicy),
-                      reinterpret_cast<void **>(&g_orig));
-
-                  registration_attempts++;
-              }
-
-              fclose(maps);
-
-              LOGI("Hook registration attempted for %d mapped files",
-                   registration_attempts);
-
-              if (registration_attempts > 0) {
-                  if (g_api->pltHookCommit()) {
-                      LOGI("PLT hook commit succeeded");
-                  } else {
-                      LOGW("PLT hook commit failed");
-                  }
-              }
-
-              if (g_orig != nullptr) {
-                  LOGI("Original AAudio function pointer is available");
-              } else {
-                  LOGW("Original AAudio function pointer was not found");
-              }
-          }
-
-          class AAudioCaptureFixModule : public zygisk::ModuleBase {
-          public:
-              void onLoad(zygisk::Api *api, JNIEnv *env) override {
-                  api_ = api;
-                  env_ = env;
-                  g_api = api;
-              }
-
-              void preAppSpecialize(
-                  zygisk::AppSpecializeArgs *args) override {
-                  const char *nice_name = nullptr;
-
-                  if (args != nullptr && args->nice_name != nullptr) {
-                      nice_name = env_->GetStringUTFChars(
-                          args->nice_name, nullptr);
-                  }
-
-                  is_target_ = (
-                      nice_name != nullptr &&
-                      strcmp(nice_name, TARGET_PACKAGE) == 0
-                  );
-
-                  if (nice_name != nullptr) {
-                      env_->ReleaseStringUTFChars(
-                          args->nice_name, nice_name);
-                  }
-
-                  if (!is_target_) {
-                      api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
-                  }
-              }
-
-              void postAppSpecialize(
-                  const zygisk::AppSpecializeArgs *args) override {
-                  if (!is_target_) {
-                      return;
-                  }
-
-                  LOGI("Loaded into Spotify");
-                  LOGI("Starting one-pass AAudio hook test");
-
-                  scan_and_hook();
-              }
-
-          private:
-              zygisk::Api *api_ = nullptr;
-              JNIEnv *env_ = nullptr;
-              bool is_target_ = false;
-          };
-
-          REGISTER_ZYGISK_MODULE(AAudioCaptureFixModule)
-          EOF
-
-          echo "Safer one-pass hook source created."
-
-      - name: Find Android SDK
-        shell: bash
-        run: |
-          SDKMANAGER=$(find /usr/local/lib/android/sdk -type f -name sdkmanager 2>/dev/null | head -n 1)
           if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found"
+            echo "Could not find Android sdkmanager"
             exit 1
           fi
-          SDK_ROOT="${SDKMANAGER%%/cmdline-tools/*}"
+
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
       - name: Install Android NDK
+        run: |
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "ndk;27.2.12479018"
+
+      - name: Find llvm-readelf
+        run: |
+          LLVM_READELF="$SDK_ROOT/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          if [ ! -x "$LLVM_READELF" ]; then
+            echo "llvm-readelf was not found"
+            exit 1
+          fi
+
+          echo "LLVM_READELF=$LLVM_READELF" >> "$GITHUB_ENV"
+
+      - name: Inspect ELF libraries
         shell: bash
         run: |
-          yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
-          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --install "ndk;27.2.12479018"
+          mkdir -p reports
+          SYMBOL="AAudioStreamBuilder_setAllowedCapturePolicy"
+          INPUT_DIR="diagnostics/elfs"
+          FOUND=0
 
-      - name: Download Zygisk header
-        shell: bash
-        run: |
-          git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
-          cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
+          {
+            echo "AAudio ELF diagnostic report"
+            echo "Target symbol: $SYMBOL"
+            echo
+          } > reports/summary.txt
 
-      - name: Enable C++ runtime
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          path = Path("jni/Application.mk")
-          source = path.read_text()
-          if re.search(r"(?m)^\s*APP_STL\s*:=", source):
-              source = re.sub(
-                  r"(?m)^\s*APP_STL\s*:=.*$",
-                  "APP_STL := c++_static",
-                  source
-              )
-          else:
-              source += "\nAPP_STL := c++_static\n"
-          path.write_text(source)
-          PY
+          if [ ! -d "$INPUT_DIR" ]; then
+            echo "No diagnostics/elfs directory exists." >> reports/summary.txt
+          else
+            while IFS= read -r -d '' FILE; do
+              FOUND=1
+              NAME="$(basename "$FILE")"
+              SAFE_NAME="$(echo "$FILE" | sed 's#[^A-Za-z0-9._-]#_#g')"
 
-      - name: Disable static initialization guards
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("jni/Android.mk")
-          source = path.read_text()
-          flag = "LOCAL_CPPFLAGS += -fno-threadsafe-statics"
-          if flag not in source:
-              marker = "LOCAL_SRC_FILES := main.cpp"
-              if marker not in source:
-                  raise SystemExit("Could not find LOCAL_SRC_FILES")
-              source = source.replace(marker, marker + "\n" + flag, 1)
-          path.write_text(source)
-          PY
+              echo "Inspecting: $FILE"
 
-      - name: Compile native library
-        shell: bash
-        run: |
-          "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \
-            NDK_PROJECT_PATH=. \
-            APP_BUILD_SCRIPT=jni/Android.mk \
-            NDK_APPLICATION_MK=jni/Application.mk
+              "$LLVM_READELF" --dyn-syms --wide "$FILE" \
+                > "reports/${SAFE_NAME}.symbols.txt" 2>&1 || true
 
-      - name: Add Magisk installer files
-        shell: bash
-        run: |
-          mkdir -p module/META-INF/com/google/android
-          curl -L --fail \
-            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh \
-            -o module/META-INF/com/google/android/update-binary
-          printf '#MAGISK\n' > module/META-INF/com/google/android/updater-script
-          chmod 755 module/META-INF/com/google/android/update-binary
+              "$LLVM_READELF" --relocations --wide "$FILE" \
+                > "reports/${SAFE_NAME}.relocations.txt" 2>&1 || true
 
-      - name: Package Magisk module
-        shell: bash
-        run: |
-          mkdir -p module/zygisk
-          cp libs/arm64-v8a/libaaudiocapturefix.so module/zygisk/arm64-v8a.so
-          cd module
-          zip -r ../aaudiocapturefix-magisk.zip .
+              if grep -Fq "$SYMBOL" "reports/${SAFE_NAME}.symbols.txt"; then
+                echo "Symbol-table match: $FILE" >> reports/summary.txt
+                grep -F "$SYMBOL" "reports/${SAFE_NAME}.symbols.txt" \
+                  >> reports/summary.txt
+              fi
 
-      - name: Verify Magisk ZIP
-        shell: bash
-        run: |
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "module.prop"
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "zygisk/arm64-v8a.so"
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "META-INF/com/google/android/update-binary"
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "META-INF/com/google/android/updater-script"
-          echo "All required module files are present."
+              if grep -Fq "$SYMBOL" "reports/${SAFE_NAME}.relocations.txt"; then
+                echo "Relocation match: $FILE" >> reports/summary.txt
+                grep -F "$SYMBOL" "reports/${SAFE_NAME}.relocations.txt" \
+                  >> reports/summary.txt
+              fi
 
-      - name: Upload Magisk ZIP
+            done < <(find "$INPUT_DIR" -type f \( -name '*.so' -o -name '*.elf' \) -print0)
+          fi
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "No .so or .elf input files were found." >> reports/summary.txt
+            echo "Add the phone's library files under diagnostics/elfs/." >> reports/summary.txt
+          fi
+
+          cat reports/summary.txt
+
+      - name: Upload diagnostic reports
         uses: actions/upload-artifact@v4
         with:
-          name: aaudiocapturefix-magisk
-          path: aaudiocapturefix-magisk.zip
+          name: aaudio-elf-diagnostic
+          path: reports/
           if-no-files-found: error

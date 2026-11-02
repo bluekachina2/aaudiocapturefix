@@ -1,1 +1,55 @@
 
+name: Build Magisk module
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.2.12479018"
+
+      - name: Download Zygisk header
+        run: |
+          git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
+          cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
+
+      - name: Compile module
+        run: |
+          "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk
+
+      - name: Package Magisk module
+        run: |
+          mkdir -p module/zygisk
+          cp libs/arm64-v8a/libaaudiocapturefix.so module/zygisk/arm64-v8a.so
+          cd module
+          zip -r ../aaudiocapturefix-magisk.zip .
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: aaudiocapturefix-magisk
+          path: aaudiocapturefix-magisk.zip

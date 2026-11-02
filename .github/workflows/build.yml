@@ -1,4 +1,57 @@
-- name: Fix Zygisk hook registration
+name: Build Magisk module
+
+"on":
+  push: {}
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract project ZIP
+        shell: bash
+        run: |
+          unzip -q aaudiocapturefix-github-project.zip -d /tmp/project
+          cp -a /tmp/project/aaudiocapturefix/jni .
+          cp -a /tmp/project/aaudiocapturefix/module .
+
+      - name: Find Android SDK
+        shell: bash
+        run: |
+          SDKMANAGER=$(find /usr/local/lib/android/sdk -type f -name sdkmanager 2>/dev/null | head -n 1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found"
+            exit 1
+          fi
+
+          SDK_ROOT="${SDKMANAGER%%/cmdline-tools/*}"
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --install "ndk;27.2.12479018"
+
+      - name: Download Zygisk header
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
+          cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
+
+      - name: Fix Zygisk hook registration
         shell: bash
         run: |
           python3 - <<'PY'
@@ -19,7 +72,6 @@
           def replace_registration(match):
               indent = match.group("indent")
               args = match.group("args")
-
               return (
                   f"{indent}g_api->pltHookRegister({args});\n"
                   f"{indent}registered_any = true;\n"
@@ -29,10 +81,93 @@
           updated, count = pattern.subn(replace_registration, source, count=1)
 
           if count != 1:
-              raise SystemExit(
-                  "ERROR: Could not patch pltHookRegister in jni/main.cpp"
-              )
+              raise SystemExit("ERROR: Could not patch pltHookRegister")
 
           path.write_text(updated)
           print("Successfully patched pltHookRegister.")
           PY
+
+      - name: Enable C++ runtime
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("jni/Application.mk")
+          source = path.read_text()
+
+          if re.search(r"(?m)^\s*APP_STL\s*:=", source):
+              source = re.sub(
+                  r"(?m)^\s*APP_STL\s*:=.*$",
+                  "APP_STL := c++_static",
+                  source
+              )
+          else:
+              source += "\nAPP_STL := c++_static\n"
+
+          path.write_text(source)
+          PY
+
+      - name: Disable static initialization guards
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("jni/Android.mk")
+          source = path.read_text()
+          flag = "LOCAL_CPPFLAGS += -fno-threadsafe-statics"
+
+          if flag not in source:
+              marker = "LOCAL_SRC_FILES := main.cpp"
+              if marker not in source:
+                  raise SystemExit("Could not find LOCAL_SRC_FILES")
+              source = source.replace(marker, marker + "\n" + flag, 1)
+
+          path.write_text(source)
+          PY
+
+      - name: Compile native library
+        shell: bash
+        run: |
+          "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=jni/Android.mk \
+            NDK_APPLICATION_MK=jni/Application.mk
+
+      - name: Add Magisk installer files
+        shell: bash
+        run: |
+          mkdir -p module/META-INF/com/google/android
+
+          curl -L --fail \
+            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh \
+            -o module/META-INF/com/google/android/update-binary
+
+          printf '#MAGISK\n' > module/META-INF/com/google/android/updater-script
+          chmod 755 module/META-INF/com/google/android/update-binary
+
+      - name: Package Magisk module
+        shell: bash
+        run: |
+          mkdir -p module/zygisk
+          cp libs/arm64-v8a/libaaudiocapturefix.so module/zygisk/arm64-v8a.so
+          cd module
+          zip -r ../aaudiocapturefix-magisk.zip .
+
+      - name: Verify Magisk ZIP
+        shell: bash
+        run: |
+          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "module.prop"
+          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "zygisk/arm64-v8a.so"
+          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "META-INF/com/google/android/update-binary"
+          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "META-INF/com/google/android/updater-script"
+          echo "All required module files are present."
+
+      - name: Upload Magisk ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: aaudiocapturefix-magisk
+          path: aaudiocapturefix-magisk.zip
+          if-no-files-found: error

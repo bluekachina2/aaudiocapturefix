@@ -1,103 +1,38 @@
-name: Build Magisk module
-
-"on":
-  push:
-  pull_request:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Extract project ZIP
+- name: Fix Zygisk hook registration
         shell: bash
         run: |
-          unzip -q aaudiocapturefix-github-project.zip -d /tmp/project
-          cp -a /tmp/project/aaudiocapturefix/jni .
-          cp -a /tmp/project/aaudiocapturefix/module .
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
 
-      - name: Find Android SDK
-        shell: bash
-        run: |
-          SDKMANAGER=$(find /usr/local/lib/android/sdk -type f -name sdkmanager 2>/dev/null | head -n 1)
+          path = Path("jni/main.cpp")
+          source = path.read_text()
 
-          if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found"
-            exit 1
-          fi
+          pattern = re.compile(
+              r'(?P<indent>^[ \t]*)bool\s+ok\s*=\s*'
+              r'g_api->pltHookRegister\s*\((?P<args>.*?)\)\s*;'
+              r'\s*(?P=indent)if\s*\(\s*ok\s*\)\s*'
+              r'\{(?P<body>.*?)\n(?P=indent)\}',
+              re.MULTILINE | re.DOTALL
+          )
 
-          SDK_ROOT="${SDKMANAGER%%/cmdline-tools/*}"
+          def replace_registration(match):
+              indent = match.group("indent")
+              args = match.group("args")
 
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+              return (
+                  f"{indent}g_api->pltHookRegister({args});\n"
+                  f"{indent}registered_any = true;\n"
+                  f'{indent}LOGI("requested hook registration");'
+              )
 
-      - name: Install Android NDK
-        shell: bash
-        run: |
-          yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
-          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --install "ndk;27.2.12479018"
+          updated, count = pattern.subn(replace_registration, source, count=1)
 
-      - name: Download Zygisk header
-        shell: bash
-        run: |
-          git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
-          cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
+          if count != 1:
+              raise SystemExit(
+                  "ERROR: Could not patch pltHookRegister in jni/main.cpp"
+              )
 
-      - name: Compile native library
-        shell: bash
-        run: |
-          "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \
-            NDK_PROJECT_PATH=. \
-            APP_BUILD_SCRIPT=jni/Android.mk \
-            NDK_APPLICATION_MK=jni/Application.mk
-
-      - name: Add Magisk installer files
-        shell: bash
-        run: |
-          mkdir -p module/META-INF/com/google/android
-
-          curl -L --fail \
-            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh \
-            -o module/META-INF/com/google/android/update-binary
-
-          printf '#MAGISK\n' > module/META-INF/com/google/android/updater-script
-
-          chmod 755 module/META-INF/com/google/android/update-binary
-
-          echo "Magisk installer files added."
-
-      - name: Package Magisk module
-        shell: bash
-        run: |
-          mkdir -p module/zygisk
-          cp libs/arm64-v8a/libaaudiocapturefix.so module/zygisk/arm64-v8a.so
-
-          cd module
-          zip -r ../aaudiocapturefix-magisk.zip .
-
-      - name: Verify Magisk ZIP
-        shell: bash
-        run: |
-          unzip -l aaudiocapturefix-magisk.zip
-
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "module.prop"
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "zygisk/arm64-v8a.so"
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "META-INF/com/google/android/update-binary"
-          unzip -Z1 aaudiocapturefix-magisk.zip | grep -Fx "META-INF/com/google/android/updater-script"
-
-          echo "All required module files are present."
-
-      - name: Upload Magisk ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: aaudiocapturefix-magisk
-          path: aaudiocapturefix-magisk.zip
-          if-no-files-found: error
+          path.write_text(updated)
+          print("Successfully patched pltHookRegister.")
+          PY

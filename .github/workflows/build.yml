@@ -26,11 +26,14 @@ jobs:
         shell: bash
         run: |
           SDKMANAGER=$(find /usr/local/lib/android/sdk -type f -name sdkmanager 2>/dev/null | head -n 1)
+
           if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager not found"
             exit 1
           fi
+
           SDK_ROOT="${SDKMANAGER%%/cmdline-tools/*}"
+
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
@@ -46,7 +49,7 @@ jobs:
           git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
           cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
 
-- name: Fix Zygisk hook registration
+      - name: Fix Zygisk hook registration
         shell: bash
         run: |
           python3 - <<'PY'
@@ -56,29 +59,35 @@ jobs:
           path = Path("jni/main.cpp")
           source = path.read_text()
 
-          pattern = (
-              r'(?ms)^([ \t]*)bool[ \t]+ok[ \t]*=[ \t]*'
-              r'g_api->pltHookRegister[ \t]*\(.*?'
-              r'^[ \t]*if[ \t]*\([ \t]*ok[ \t]*\)[ \t]*'
-              r'\{.*?^[ \t]*\}'
+          pattern = re.compile(
+              r'(?P<indent>^[ \t]*)bool\s+ok\s*=\s*'
+              r'g_api->pltHookRegister\s*\((?P<args>.*?)\)\s*;'
+              r'\s*(?P=indent)if\s*\(\s*ok\s*\)\s*'
+              r'\{(?P<body>.*?)\n(?P=indent)\}',
+              re.MULTILINE | re.DOTALL
           )
 
-          replacement = (
-              r'\1g_api->pltHookRegister(\n'
-              r'\1    dev, ino, HOOK_SYMBOL,\n'
-              r'\1    reinterpret_cast<void *>(hook_setAllowedCapturePolicy),\n'
-              r'\1    reinterpret_cast<void **>(&g_orig));\n'
-              r'\1registered_any = true;\n'
-              r'\1LOGI("requested hook registration for %s", path);'
-          )
+          def replace_registration(match):
+              indent = match.group("indent")
+              args = match.group("args")
 
-          updated, count = re.subn(pattern, replacement, source, count=1)
+              return (
+                  f"{indent}g_api->pltHookRegister({args});\n"
+                  f"{indent}registered_any = true;\n"
+                  f'{indent}LOGI("requested hook registration for %s", path);'
+              )
+
+          updated, count = pattern.subn(
+              replace_registration,
+              source,
+              count=1
+          )
 
           if count != 1:
-              print("Could not locate the expected registration block.")
-              for i, line in enumerate(source.splitlines(), 1):
+              print("ERROR: Could not locate the hook registration block.")
+              for number, line in enumerate(source.splitlines(), 1):
                   if "pltHookRegister" in line or "bool ok" in line:
-                      print(f"{i}: {line}")
+                      print(f"{number}: {line}")
               raise SystemExit(1)
 
           path.write_text(updated)

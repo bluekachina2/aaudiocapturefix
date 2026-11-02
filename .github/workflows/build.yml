@@ -46,6 +46,38 @@ jobs:
           git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
           cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
 
+      - name: Fix Zygisk hook registration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("jni/main.cpp")
+          source = path.read_text()
+
+          old = """        bool ok = g_api->pltHookRegister(
+              dev, ino, HOOK_SYMBOL,
+              reinterpret_cast<void *>(hook_setAllowedCapturePolicy),
+              reinterpret_cast<void **>(&g_orig));
+          if (ok) {
+              registered_any = true;
+              LOGI("registered against %s", path);
+          }"""
+
+          new = """        g_api->pltHookRegister(
+              dev, ino, HOOK_SYMBOL,
+              reinterpret_cast<void *>(hook_setAllowedCapturePolicy),
+              reinterpret_cast<void **>(&g_orig));
+          registered_any = true;
+          LOGI("requested hook registration for %s", path);"""
+
+          if source.count(old) != 1:
+              raise SystemExit("ERROR: Expected source code block not found exactly once.")
+
+          path.write_text(source.replace(old, new))
+          print("Zygisk registration code patched successfully.")
+          PY
+
       - name: Compile native library
         run: |
           "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \

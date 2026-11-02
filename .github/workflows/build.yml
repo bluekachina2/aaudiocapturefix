@@ -23,6 +23,67 @@ jobs:
           cp -a /tmp/project/aaudiocapturefix/jni .
           cp -a /tmp/project/aaudiocapturefix/module .
 
+      - name: Create safe diagnostic main.cpp
+        shell: bash
+        run: |
+          cat > jni/main.cpp <<'EOF'
+          #include <android/log.h>
+          #include <string.h>
+          #include "zygisk.hpp"
+
+          #define LOG_TAG "AAudioCaptureFix"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+
+          static const char *TARGET_PACKAGE = "com.spotify.music";
+
+          class AAudioCaptureFixModule : public zygisk::ModuleBase {
+          public:
+              void onLoad(zygisk::Api *api, JNIEnv *env) override {
+                  api_ = api;
+                  env_ = env;
+              }
+
+              void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
+                  const char *nice_name = nullptr;
+
+                  if (args != nullptr && args->nice_name != nullptr) {
+                      nice_name = env_->GetStringUTFChars(args->nice_name, nullptr);
+                  }
+
+                  is_target_ = (
+                      nice_name != nullptr &&
+                      strcmp(nice_name, TARGET_PACKAGE) == 0
+                  );
+
+                  if (nice_name != nullptr) {
+                      env_->ReleaseStringUTFChars(args->nice_name, nice_name);
+                  }
+
+                  if (!is_target_) {
+                      api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+                  }
+              }
+
+              void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
+                  if (!is_target_) {
+                      return;
+                  }
+
+                  LOGI("Diagnostic module loaded into Spotify.");
+                  LOGI("AAudio hook is disabled for this test.");
+              }
+
+          private:
+              zygisk::Api *api_ = nullptr;
+              JNIEnv *env_ = nullptr;
+              bool is_target_ = false;
+          };
+
+          REGISTER_ZYGISK_MODULE(AAudioCaptureFixModule)
+          EOF
+
+          echo "Safe diagnostic source created."
+
       - name: Find Android SDK
         shell: bash
         run: |
@@ -50,42 +111,6 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
           cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
-
-      - name: Fix Zygisk hook registration
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("jni/main.cpp")
-          source = path.read_text()
-
-          pattern = re.compile(
-              r'(?P<indent>^[ \t]*)bool\s+ok\s*=\s*'
-              r'g_api->pltHookRegister\s*\((?P<args>.*?)\)\s*;'
-              r'\s*(?P=indent)if\s*\(\s*ok\s*\)\s*'
-              r'\{(?P<body>.*?)\n(?P=indent)\}',
-              re.MULTILINE | re.DOTALL
-          )
-
-          def replace_registration(match):
-              indent = match.group("indent")
-              args = match.group("args")
-              return (
-                  f"{indent}g_api->pltHookRegister({args});\n"
-                  f"{indent}registered_any = true;\n"
-                  f'{indent}LOGI("requested hook registration");'
-              )
-
-          updated, count = pattern.subn(replace_registration, source, count=1)
-
-          if count != 1:
-              raise SystemExit("ERROR: Could not patch pltHookRegister")
-
-          path.write_text(updated)
-          print("Successfully patched pltHookRegister.")
-          PY
 
       - name: Enable C++ runtime
         shell: bash

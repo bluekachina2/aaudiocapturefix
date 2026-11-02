@@ -23,14 +23,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-     - name: Set up Android SDK
-  uses: android-actions/setup-android@v4
-
-- name: Accept Android SDK licenses
-  run: yes | sdkmanager --licenses
+    
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: ''
 
       - name: Install Android NDK
-        run: sdkmanager "ndk;27.2.12479018"
+        run: sdkmanager --install "ndk;27.2.12479018"
+
 
       - name: Download Zygisk header
         run: |

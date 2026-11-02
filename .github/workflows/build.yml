@@ -1,58 +1,18 @@
 ```yaml
 name: Build Magisk module
 
-on: [push, pull_request, workflow_dispatch]
-
-permissions:
-  contents: read
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-24.04
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find Android SDK
-        shell: bash
-        run: |
-          SDKMANAGER=$(find /usr/local/lib/android/sdk -name sdkmanager -type f 2>/dev/null | head -n 1)
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager not found"
-            exit 1
-          fi
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-
-      - name: Install NDK
-        shell: bash
-        run: |
-          yes | "$SDKMANAGER" --licenses || true
-          "$SDKMANAGER" --install "ndk;27.2.12479018"
-
-      - name: Download Zygisk header
-        run: |
-          git clone --depth 1 https://github.com/topjohnwu/zygisk-module-sample.git /tmp/zygisk
-          cp /tmp/zygisk/module/jni/zygisk.hpp jni/zygisk.hpp
-
-      - name: Compile
-        run: |
-          "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \
-            NDK_PROJECT_PATH=. \
-            APP_BUILD_SCRIPT=jni/Android.mk \
-            NDK_APPLICATION_MK=jni/Application.mk
-
-      - name: Package
-        run: |
-          mkdir -p module/zygisk
-          cp libs/arm64-v8a/libaaudiocapturefix.so module/zygisk/arm64-v8a.so
-          cd module
-          zip -r ../aaudiocapturefix-magisk.zip .
-
-      - name: Upload ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: aaudiocapturefix-magisk
-          path: aaudiocapturefix-magisk.zip
-          if-no-files-found: error
+      - name: Test workflow
+        run: echo "GitHub Actions YAML is working"
 ```

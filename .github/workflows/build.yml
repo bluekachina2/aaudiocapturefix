@@ -94,6 +94,29 @@ jobs:
           print("Hook registration patch applied successfully.")
           PY
 
+      - name: Enable C++ runtime
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("jni/Application.mk")
+          source = path.read_text()
+
+          if re.search(r"(?m)^\s*APP_STL\s*:=", source):
+              source = re.sub(
+                  r"(?m)^\s*APP_STL\s*:=.*$",
+                  "APP_STL := c++_static",
+                  source
+              )
+          else:
+              source += "\nAPP_STL := c++_static\n"
+
+          path.write_text(source)
+          print("C++ static runtime enabled.")
+          PY
+
       - name: Compile native library
         run: |
           "$ANDROID_HOME/ndk/27.2.12479018/ndk-build" \

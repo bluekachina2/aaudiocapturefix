@@ -1,4 +1,4 @@
-
+```yaml
 name: Build Magisk module
 
 on:
@@ -17,13 +17,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Accept Android SDK licenses
+      - name: Locate Android SDK tools
         run: |
-          yes | sdkmanager --licenses
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          find /usr/local/lib/android/sdk -type f -name sdkmanager 2>/dev/null || true
 
       - name: Install Android NDK
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
+          SDKMANAGER="$(find /usr/local/lib/android/sdk -type f -name sdkmanager 2>/dev/null | head -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager was not found"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" --install "ndk;27.2.12479018"
 
       - name: Download Zygisk header
         run: |
@@ -50,3 +58,4 @@ jobs:
           name: aaudiocapturefix-magisk
           path: aaudiocapturefix-magisk.zip
           if-no-files-found: error
+```

@@ -1,18 +1,13 @@
-```yaml
 name: Build Magisk module
-
 "on":
   push:
   pull_request:
   workflow_dispatch:
-
 jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Test workflow
         run: echo "GitHub Actions YAML is working"
-```
